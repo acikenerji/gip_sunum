@@ -1,0 +1,184 @@
+---
+title: "Gün İçi Elektrik Piyasası Özeti"
+subtitle: "EPİAŞ Şeffaflık Platformu"
+date: '`r format(lubridate::as_date(params$data_date),format="%d/%m/%Y")`'
+output:
+  xaringan::moon_reader:
+    lib_dir: libs
+    css: ["intraday_presentation_custom.css",default,metropolis,metropolis-fonts]  
+    nature:
+      highlightStyle: github
+      highlightLines: true
+      countIncrementalSlides: false
+      ratio: '16:9'
+      slideNumberFormat: |
+        <div class="progress-bar-container">
+          <div class="progress-bar" style="width: calc(%current% / %total% * 100%);">
+          </div>
+        </div>
+params:
+  data_date: !r lubridate::as_date("2021-11-12")
+---
+
+layout: true
+  
+<div class="my-footer"><span>Otomatik oluşturulmuş rapor. Açık Enerji: (https://github.com/acikenerji) | Veri Kaynağı: https://seffaflik.epias.com.tr</span></div> 
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning=FALSE,message=FALSE)
+# library(flexdashboard)
+try(detach("package:intraday", unload=TRUE),silent = TRUE) # Update: Does not return error message to prevent confusion
+library(intraday)
+library(lubridate)
+library(tidyverse)
+library(reactable)
+library(echarts4r)
+```
+
+```{r get_raw_price_data}
+price_df_raw <- readr::read_csv(system.file("market-data/price_data.csv",package="intraday"),locale=readr::locale(tz="Turkey"))
+colnames(price_df_raw)[1] <- "X1" ## TEMP fix
+
+price_df <- price_df_raw %>% select(-X1) %>% mutate(date=as_datetime(date,tz="Turkey")) %>% relocate(aof,.after=mcp)
+
+summary_df_raw <- readr::read_csv(system.file("market-data/intraday_summary.csv",package="intraday"),locale=readr::locale(tz="Turkey"))
+colnames(summary_df_raw)[1] <- "X1" ## TEMP fix
+
+transactions_df_raw <- readr::read_csv(system.file("market-data/intraday_transactions.csv",package="intraday"),locale=readr::locale(tz="Turkey"))
+colnames(transactions_df_raw)[1] <- "X1" ## TEMP fix
+
+tx_df <- preprocess_transactions_df(transactions_df_raw)
+
+the_date <- as_date(names(table(as_date(price_df_raw$date)))[1])
+
+top_contracts_df <- tx_df %>% group_by(contract) %>% summarise(total_mwh = sum(quantity_in_mwh*pmax(1,block_hours))) %>% ungroup() %>% arrange(desc(total_mwh))
+```
+
+
+# Özet Bilgiler
+
+```{r}
+
+valuebox_vec <-  price_df %>% mutate(pd_aof_mcp = aof-mcp,pd_aof_smp = aof-smp) %>% summarise(md_mcp=round(mean(pd_aof_mcp,na.rm=TRUE),2),md_smp=round(mean(pd_aof_smp,na.rm=TRUE),2)) %>% unlist()
+
+timv <- summary_df_raw %>% summarise(timv=format(round(sum(tradingVolume,na.rm=TRUE)),big.mark=",",small.mark="."))
+
+timv_mwh <- format_num_tr(sum(summary_df_raw$volume))
+
+top_block_contracts <- top_contracts_df %>% filter(!grepl("PH",contract)) %>% slice(1)
+```
+
+
++ Gün İçi Piyasası Toplam Hacmi: `r paste0(timv, " TL / ",timv_mwh, " MWh")`
++ İşlem Sayısı: `r nrow(tx_df)`
++ İşlem Gören Blok Kontrat Sayısı: `r nrow(summary_df_raw %>% filter(grepl("PB",contract)))`
++ En çok işlem gören kontrat: `r paste0(top_contracts_df$contract[1]," (",format_num_tr(top_contracts_df$total_mwh[1])," MWh)")`
++ En çok işlem gören blok kontrat: `r paste0(top_block_contracts$contract[1]," (",format_num_tr(top_block_contracts$total_mwh[1])," MWh)")`
++ AOF'nin PTF'den sapma miktarı: `r paste0(valuebox_vec[1], " TL")`
++ AOF'nin SMF'den sapma miktarı: `r paste0(valuebox_vec[2], " TL")`
+
+<h2> Piyasa Ortalamaları </h2>
+
++ AOF Aritmetik Ortalama: `r paste0(format_num_tr(round(mean(price_df$aof,na.rm=TRUE),2)), " TL")`
++ PTF Aritmetik Ortalama: `r paste0(format_num_tr(round(mean(price_df$mcp,na.rm=TRUE),2)), " TL")`
++ SMF Aritmetik Ortalama: `r paste0(format_num_tr(round(mean(price_df$smp,na.rm=TRUE),2)), " TL")`
+
+---
+
+# AOF'nin PTF ve SMF'ye Göre Gelişimi
+
+```{r}
+hours_aof_proper <- price_df %>% mutate(aof_b=between(aof,mcp,smp) | between(aof,smp,mcp)) %>% summarise(hours=sum(aof_b)) %>% unlist()
+```
+
+AOF `r hours_aof_proper` saat boyunca PTF ve SMF arasında yer almıştır. Geri kalan zamanlarda SMF oluşumuna veya doğrudan sistem yönüne aykırı davranmıştır.
+
+```{r,fig.width=10,fig.height=4,dpi=300}
+plot_df_daily <- price_df %>% select(-smpDirection) %>% rename(PTF=mcp,AOF=aof,SMF=smp) %>% tidyr::pivot_longer(-date)
+
+ggplot(plot_df_daily,aes(x=hour(date),y=value,color=name)) + geom_line() + geom_point() + theme_minimal() + labs(x="Saat",y="Fiyat (TL)",color="Piyasa") + theme(legend.position = "top")
+```
+
+---
+
+# Piyasa Özet Tablosu
+
+```{r}
+price_df_knitr <-
+price_df %>% 
+  transmute(Saat = format(date,format="%H:%M"),PTF = mcp,AOF=aof,SMF=smp,
+            `Sistem Yönü`=case_when(smpDirection == "ENERGY_DEFICIT" ~ "Enerji Açığı",
+                                    smpDirection == "ENERGY_SURPLUS" ~ "Enerji Fazlası",
+                                    smpDirection == "IN_BALANCE" ~ "Denge",
+                                    TRUE ~ "Bilinmiyor"))
+
+```
+
+.pull-left[
+`r knitr::kable(price_df_knitr %>% slice(1:12)) %>% kableExtra::kable_styling(full_width = T, position = "center")`
+]
+
+.pull-right[
+`r knitr::kable(price_df_knitr %>% slice(13:24)) %>% kableExtra::kable_styling(full_width = T, position = "center")`
+]
+
+---
+
+# En Yüksek Hacimde İşlem Gören Kontratlar
+
+```{r,fig.width=10,fig.height=5,dpi=300}
+contracts_df <- tx_df %>% group_by(contract) %>% summarise(total_mwh = sum(quantity_in_mwh*pmax(1,block_hours))) %>% ungroup() %>% arrange(desc(total_mwh)) %>% slice(1:20) %>% arrange(total_mwh)
+
+ggplot(contracts_df,aes(x=reorder(contract,total_mwh),y=total_mwh)) + geom_bar(stat="identity",width=0.8,fill="darkorange") + coord_flip() + theme_minimal() + labs(x=NULL,y="Kontrat Hacmi (MWh)")
+```
+
+
+---
+
+# Saatlik Kontratlar (1)
+
+```{r}
+summary_knitr_df <- summary_df_raw %>% arrange(contract) %>% select(Kontrat=contract,MWh=volume,Hacim=tradingVolume,`Min Fiyat`=minMatchPrice,`Maks Fiyat`=maxMatchPrice,`Alış Teklif MWh`=quantityOfBid,`Satış Teklif MWh`=quantityOfAsk)
+
+pb_summary_df <- summary_knitr_df %>% filter(grepl("PB",Kontrat))
+```
+
+```{r}
+knitr::kable(summary_knitr_df %>% filter(grepl("PH",Kontrat)) %>% slice(1:12)) %>% kableExtra::kable_styling(full_width = T, position = "center")
+```
+
+---
+
+# Saatlik Kontratlar (2)
+
+```{r}
+knitr::kable(summary_knitr_df %>% filter(grepl("PH",Kontrat)) %>% slice(13:24)) %>% kableExtra::kable_styling(full_width = T, position = "center")
+```
+
+
+
+```{r, results='asis', eval=TRUE}
+
+pb_total_pages <- ceiling(nrow(pb_summary_df) / 12)
+
+for( i in 1:pb_total_pages){
+    kable_obj <- knitr::kable(pb_summary_df %>% slice((1:12 + 12*(i-1)))) %>% kableExtra::kable_styling(full_width = T, position = "center")
+
+cat("---\n# Blok Kontratlar",paste0("(",i,")"),"\n",
+    kable_obj,"\n\n")}
+```
+
+---
+
+# Rapor Hakkında
+
++ Bu rapor tamamen otomatik bir şekilde oluşturulmuştur. Rapora erişim tamamen ücretsiz bir şekilde sunulmaktadır.
+
++ Rapor ve içeriği ile ilgili yazarlar herhangi bir sorumluluk kabul etmemektedir.
+
++ Veriler EPİAŞ Şeffaflık Platformu'ndan alınmaktadır.
+
++ Gereken kodların önemli bir kısmı intraday R paketinden (https://github.com/berkorbay/intraday) alınmaktadır.
+
