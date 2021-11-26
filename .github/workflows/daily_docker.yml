@@ -6,10 +6,10 @@ on:
     branches:
       - "main"
 jobs:
-  env:
-    GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
   build:
     runs-on: ubuntu-latest
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
     container:
       image: berkorbay/intraday
     steps:
